@@ -1,8 +1,6 @@
 import cv2
 import numpy as np
 import time
-
-
 import serial
 from tensorflow.lite.python.interpreter import Interpreter
 
@@ -15,11 +13,23 @@ CONFIDENCE_THRESHOLD = 0.5
 DETECTION_THRESHOLD = 5       # Send to Arduino after consistent detections
 INPUT_IMAGE_SIZE = (300, 300) # Match your model input size
 
+# ====== Material Code Mapping ======
+# Maps label string -> integer code that Arduino expects
+MATERIAL_CODES = {
+    "cardboard": 1,
+    "glass": 2,
+    "metal": 3,
+    "paper": 4,
+    "plastic": 5
+}
+
 # ====== Load Labels ======
 labels = {}
 with open(LABELS_PATH, "r") as f:
     for i, line in enumerate(f.readlines()):
         labels[i] = line.strip()
+
+print(f"[INFO] Loaded labels: {labels}")
 
 # ====== Load TFLite Model ======
 print("[INFO] Loading model...")
@@ -28,24 +38,46 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 _, height, width, _ = input_details[0]['shape']
+print(f"[INFO] Model loaded. Input size: {width}x{height}")
 
 # ====== Setup Serial Connection ======
 try:
     arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
     time.sleep(2)  # wait for Arduino to be ready
     print(f"[INFO] Serial connected to {SERIAL_PORT}")
-except:
+except Exception as e:
     arduino = None
-    print("[WARNING] Serial not connected. Check your port.")
+    print(f"[WARNING] Serial not connected: {e}")
 
 # ====== Function to Send Command ======
-def send_command_to_arduino(code):
+def send_command_to_arduino(material_code):
+    """
+    Send a single integer material code to Arduino.
+    Protocol: Arduino expects a single integer (1-5) via Serial.parseInt().
+    """
     if arduino:
-        print(f"[SEND COMMAND] → {code}")
-        arduino.write(f"{code}\n".encode())
+        command = f"{material_code}\n"
+        print(f"[SEND] Material code {material_code} → Arduino")
+        arduino.write(command.encode())
         time.sleep(0.1)
+
+        # Wait for Arduino to finish moving (read "Done Moving" response)
+        print("[WAIT] Waiting for Arduino to finish...")
+        start_time = time.time()
+        timeout = 30  # 30 second timeout for arm movement
+        while time.time() - start_time < timeout:
+            if arduino.in_waiting > 0:
+                response = arduino.readline().decode().strip()
+                print(f"[ARDUINO] {response}")
+                if response == "Done Moving":
+                    print("[OK] Arduino finished moving.")
+                    return True
+            time.sleep(0.1)
+        print("[TIMEOUT] Arduino did not respond in time.")
+        return False
     else:
-        print(f"[MOCK SEND] Would send → {code}")
+        print(f"[MOCK SEND] Would send material code → {material_code}")
+        return True
 
 # ====== Start Webcam ======
 cap = cv2.VideoCapture(0)
@@ -95,17 +127,13 @@ while True:
                 object_counts[label] += 1
 
                 if object_counts[label] >= DETECTION_THRESHOLD:
-                    # Send code once detection threshold reached
-                    if label == "cardboard":
-                        send_command_to_arduino(1)
-                    elif label == "glass":
-                        send_command_to_arduino(2)
-                    elif label == "metal":
-                        send_command_to_arduino(3)
-                    elif label == "paper":
-                        send_command_to_arduino(4)
-                    elif label == "plastic":
-                        send_command_to_arduino(5)
+                    # Get the material code for this label
+                    material_code = MATERIAL_CODES.get(label)
+                    if material_code is not None:
+                        print(f"[TRIGGER] {label} detected {DETECTION_THRESHOLD} times → sending code {material_code}")
+                        send_command_to_arduino(material_code)
+                    else:
+                        print(f"[ERROR] No material code mapping for label: {label}")
 
                     object_counts = {k: 0 for k in object_counts}  # reset all counts
                     break
